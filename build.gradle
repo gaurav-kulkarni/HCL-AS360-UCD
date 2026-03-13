@@ -1,54 +1,151 @@
-import groovy.xml.XmlParser
+/**
+ * (c) Copyright HCL Technologies Ltd. 2018, 2020. All Rights Reserved.
+ * This is licensed under the following license.
+ * The Eclipse Public 1.0 License (http://www.eclipse.org/legal/epl-v10.html)
+ */
 
-plugins {
-    id 'java'
+def pluginName="HCL-AppScan360-UCD-open"
+
+apply plugin: 'groovy'
+
+defaultTasks 'distPlugin'
+
+def buildLocaleDir = 'build/locale'
+def buildUtilDir   = 'build/util'
+
+configurations {
+    // Remove the groovy-all jar from runtime dependencies
+    runtime.exclude module: 'groovy-all'
 }
 
 repositories {
     mavenCentral()
-}
-
-defaultTasks("dist")
-
-java {
-    sourceCompatibility = JavaVersion.VERSION_11
-    targetCompatibility = JavaVersion.VERSION_11
+    maven {
+        url "https://public.dhe.ibm.com/software/products/UrbanCode/maven2/"
+    }
 }
 
 dependencies {
-    // Add Log4j core and API as dependencies (update version as needed)
-    implementation 'org.apache.logging.log4j:log4j-core:2.24.1'
-    implementation 'org.apache.logging.log4j:log4j-api:2.24.1'
+    // groovy-plugin-utils pulls down groovy-all as a transitive dependency for the 'compile' configuration
+    compile 'com.ibm.urbancode.plugins:groovy-plugin-utils:+'
+    compile 'com.ibm.urbancode.util:i18n-scraper:+'
+    compile 'com.ibm.urbancode.commons:HttpComponents-Util:+'
+    compile 'com.ibm.urbancode.commons:CommonsUtil:+'
+    compile 'commons-lang:commons-lang:2.5'
+    compile 'org.apache.httpcomponents:httpclient:+'
+    compile 'org.apache.httpcomponents:httpcore:+'
+    compile 'org.apache.httpcomponents:httpmime:+'
+    compile 'log4j:log4j:1.2.16'
+
+    // This compiles the i18n-scraper script
+    compile localGroovy()
+    // compile group: 'org.apache.httpcomponents', name: 'httpclient', version: '4.3.6'
+    // testCompile group: 'junit', name: 'junit', version: '4.11'
 }
 
-// Task to copy dependencies to the lib directory
-tasks.register('copyDependencies', Copy) {
-    from configurations.runtimeClasspath
-    into "build/libs"
-}
-
-tasks.register("dist", Zip) {
-
-    dependsOn("copyDependencies", "build")
-
-    from("build/libs") {
-        include("*.jar")
-    }
-
-    String pluginVersion
-    if (project.hasProperty('pluginVersion')) {
-        pluginVersion = project.getProperty('pluginVersion')
-    } else {
-        def pluginNode = new XmlParser().parse(new File('src/main/zip/plugin.xml'))
-        pluginVersion = "${pluginNode.header.identifier.@version[0]}.dev"
-    }
-
-    from("src/main/zip") {
-        filter {
-            it.replace("@RELEASE_VERSION@", "$pluginVersion")
+sourceSets {
+    main {
+        groovy {
+            srcDirs = ['src/main/groovy', 'src/main/zip', "${buildDir}/util"]
         }
     }
+    zip {
+        groovy {
+            srcDirs = ['src/main/zip']
+        }
+    }
+    classes {
+        groovy {
+            srcDirs = ['src/main/groovy', "${buildDir}/util"]
+        }
+    }
+}
 
-    destinationDirectory.set(file("build/distributions"))
-    archiveFileName = "${rootProject.name}-${pluginVersion}.zip"
+compileJava {
+    dependsOn 'extractGPU', 'copyi18n'
+}
+compileGroovy {
+    include "i18n-scraper.groovy"
+    // exclude '*.groovy'
+    // exclude 'com/**'
+}
+
+task copyDeps(type: Copy) {
+    into 'lib'
+    copy {
+        from configurations.runtime
+        include { target ->
+            return target.file.path.contains("com.ibm.urbancode") ||
+                target.file.path.contains("commons-lang") || 
+                target.file.path.contains("org.apache.httpcomponents") ||
+                target.file.path.contains("log4j")
+        }
+        into 'lib'
+        rename { fileName ->
+            stripVersion(fileName)
+        }
+    }
+    copy {
+        from configurations.runtime
+        exclude { target ->
+            return target.file.path.contains("com.ibm.urbancode") ||
+                target.file.path.contains("commons-lang") || 
+                target.file.path.contains("org.apache.httpcomponents") ||
+                target.file.path.contains("log4j")
+        }
+        into 'lib'
+    }
+}
+
+task extractGPU(type: Copy) {
+    def zipFile = file('lib/groovy-plugin-utils.jar')
+    def outputDir = file("${buildDir}/util")
+
+    from zipTree(zipFile)
+    into outputDir
+}
+
+task copyi18n(type: Copy) {
+    def i18nFile = file('lib/i18n-scraper.groovy')
+    def outputDir = file("${buildDir}/util")
+
+    from i18nFile
+    into outputDir
+}
+
+task distPlugin(type: Zip, dependsOn: ['compileGroovy', 'gatherI18n']) {
+    from(sourceSets.zip.groovy.srcDirs)
+
+    into('lib') {
+        from copyDeps
+        exclude 'i18n-scraper.groovy'
+        exclude 'groovy-plugin-utils.jar'
+        exclude 'groovy-all-*.jar'
+        exclude 'gson-*.jar'
+    }
+    into('locale') {
+        from buildLocaleDir
+    }
+    into('classes') {
+        from sourceSets.classes.groovy.srcDirs
+        exclude 'META-INF', 'i18n-scraper.groovy'
+    }
+    archiveName = "${pluginName}-dev.zip"
+}
+
+task gatherI18n(type: JavaExec) {
+    delete buildLocaleDir
+    mkdir buildLocaleDir
+
+    main = 'i18n-scraper'
+    args 'build/locale/en.properties'
+    classpath = sourceSets.main.runtimeClasspath
+}
+
+task cleanAll(dependsOn: ['clean', 'cleanCopyDeps', 'cleanDistPlugin', 'cleanGatherI18n'])
+
+String stripVersion(String fileNameWithVersion) {
+    String ext = fileNameWithVersion.substring(fileNameWithVersion.lastIndexOf("."),fileNameWithVersion.length())
+    int end = fileNameWithVersion.lastIndexOf("-"); //assumes that: name-version.ext. Will not work with name-version-SNAPSHOT.ext
+    return fileNameWithVersion.substring(0, end) + ext
 }
